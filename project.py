@@ -1,14 +1,7 @@
-from compression import zlib
-import enum
-import hashlib
-from inspect import signature
-import os
-import collections
-from os import path
-from readline import write_history_file
-import struct
-from ipykernel import write_connection_file
+# my very own take on git, made by a braindead dev in python (  had to resort to big C for this one B)  )
 
+import argparse, collections, difflib, enum, hashlib, operator, os, stat
+import struct, sys, time, urllib.request, zlib
 
 class ObjType(enum.Enum):
     commit = 1
@@ -23,7 +16,6 @@ def write_file(path, data):
     with open(path, "wb") as f:
         f.write(data)
 
-
 def init(repo):
 
     #create repo dir & write metadata folders, head file pointing to refs/heads/master and prints confirm
@@ -34,6 +26,7 @@ def init(repo):
     write_connection_file(os.path.join(repo, ".git", "HEAD"), "ref: refs/heads/master\n")
     print('initial empty repo: {}'.format(repo))
     
+    #Data for one entry in the git index
     Index = collections.namedtuple('index', ['ctime_s', 'ctime_n', 'mtime_s', 'mtime_n',
                                              'dev', 'ino', 'mode', 'uid', 'gid', 'size',
                                              'sha1', 'flags', 'path'])
@@ -80,7 +73,20 @@ def init(repo):
             write_history_file(path, zlib.compress(FullData))
         return sha1
     changed = {p for p in (path & entry_paths)
-                  if hash_obj(read_file(p), 'blob', write = false) != entries_by_path[p].sha1.hex()}
+                  if hash_obj(read_file(p), 'blob', write=False) != entries_by_path[p].sha1.hex()}
+
+    #looks up an obj by the sha-1 prefix that req 2 char and return full obj path
+    def find_obj(sha1_prefix):
+        if len(sha1_prefix) < 2:
+            raise ValueError('hash prefix must be at least 2 characters')
+        obj_dir = os.path.join(repo, ".git", "obj", sha1_prefix[:2])
+        rest = sha1_prefix[2:]
+        objs = [name for name in os.listdir(obj_dir) if name.startswith(rest)]
+        if not objs:
+            raise ValueError('object {!r} not found'.format(sha1_prefix))
+        if len(objs) >= 2:
+            raise ValueError('multiple objects found with prefix {!r}: {}'.format(sha1_prefix, objs))
+        return os.path.join(obj_dir, objs[0])
     
     #write index parse git-style entries, validate file checksum and file metadata, and blob sha-1 in binary index format, write to .git/index
     def WriteIndex(entries):
@@ -98,3 +104,48 @@ def init(repo):
         all_data = header + b''.join(packed_entries)
         digest = hashlib.sha1(all_data).digest()
         write_file(os.path.join(repo, ".git", "index"), all_data + digest)
+
+    #read obj takes a sha-1 prefix finds the obj parses the header and data and returns the obj type and data
+    def read_obj(sha1_prefix):
+        path = find_obj(sha1_prefix)
+        fu_data = zlib.decompress(read_file(path))
+        null_index = fu_data.find(b'\x00')
+        header = fu_data[:null_index]
+        obj_type, size_str = header.decode().split()
+        size = int(size_str)
+        dat = fu_data[null_index + 1:]
+        assert size == len(dat), "invalid object size: expected {}, got {}".format(size, len(dat))
+        return (obj_type, dat)
+    
+#read a git obj by prefix then either print in raw like type n size or tree list depending on req mode  
+    def cat_file(mode, sha1_prefix):
+        obj_type, data = read_object(sha1_prefix)
+        if mode in ['commit', 'tree', 'blob']:
+            if obj_type != mode:
+                raise ValueError('expected object type {}, got {}'.format(
+                        mode, obj_type))
+            sys.stdout.buffer.write(data)
+        elif mode == 'size':
+            print(len(data))
+        elif mode == 'type':
+            print(obj_type)
+        elif mode == 'pretty':
+            if obj_type in ['commit', 'blob']:
+                sys.stdout.buffer.write(data)
+            elif obj_type == 'tree':
+                for mode, path, sha1 in read_tree(data=data):
+                    type_str = 'tree' if stat.S_ISDIR(mode) else 'blob'
+                    print('{:06o} {} {}\t{}'.format(mode, type_str, sha1, path))
+            else:
+                assert False, 'unhandled object type {!r}'.format(obj_type)
+        else:
+            raise ValueError('unexpected mode {!r}'.format(mode))
+
+    #prints the lis of files in index if details is true
+    def ls_file(details=False):
+        for entry in ReadIndex():
+            if details:
+                stage = (entry.flags >> 12) & 3
+                print('{:6o} {} {:}\t{}'.format(entry.mode, entry.sha1.hex(), stage, entry.path))
+            else:
+                print(entry.path)
